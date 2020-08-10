@@ -1,0 +1,391 @@
+
+<html>
+  <script id='2d-vertex-shader' type='notjs'>
+    attribute vec4 a_position;
+    uniform vec2 u_resolution;
+
+    void main() {
+       vec2 zeroToOne = a_position.xy / u_resolution;
+       vec2 zeroToTwo = zeroToOne * 2.0;
+       vec2 clipSpace = zeroToTwo - 1.0;
+       gl_Position = vec4(clipSpace, 0, 1);
+    }
+  </script>
+
+  <script id='2d-fragment-shader' type='notjs'>
+    precision mediump float;
+
+    void main() {
+      gl_FragColor = vec4(0, 0, 0, 1);
+    }
+  </script>
+
+  <script>
+    'use strict';
+
+    class Grid {
+    	constructor(dimensions = []) {
+      	this.gl = this.createCanvas(dimensions);
+        this.loadShaders();
+        this.lineThickness = 0.35;
+        this.rectangleBuffer = [];
+        this.blackCells = [];
+        this.defaultSize = 50;
+        this.scale = 1;
+        this.minZoomFactor = 0.2;
+        this.maxZoomFactor = 4;
+        this.keyboardSpeed = 20;
+        this.offsetX = 0;
+        this.offsetY = 0;
+        this.zoomOffsetX = 0;
+        this.zoomOffsetY = 0;
+        this.zoomingSpeed = -0.01;
+        this.handleEvents();
+        this.animationLoop();
+      }
+
+      setDimensions() {
+        const windowDimensions = [window.innerWidth, window.innerHeight];
+        [this.width, this.height] = windowDimensions;
+      }
+
+      createCanvas(dimensions) {
+        this.setDimensions();
+        if(dimensions.length)
+          [this.width, this.height] = dimensions;
+      	const canvas = document.createElement('canvas');
+        [canvas.width, canvas.height] = [this.width, this.height];
+        document.body.appendChild(canvas);
+        this.canvas = canvas;
+        return canvas.getContext('webgl');
+      }
+
+      loadShaders() {
+        let source = document.getElementById('2d-vertex-shader').innerHTML;
+        const vertexShader = this.gl.createShader(this.gl.VERTEX_SHADER);
+        this.gl.shaderSource(vertexShader,source);
+        this.gl.compileShader(vertexShader);
+        source = document.getElementById('2d-fragment-shader').innerHTML;
+        const fragmentShader = this.gl.createShader(this.gl.FRAGMENT_SHADER);
+        this.gl.shaderSource(fragmentShader, source);
+        this.gl.compileShader(fragmentShader);
+        this.program = this.gl.createProgram();
+        this.gl.attachShader(this.program, vertexShader);
+        this.gl.attachShader(this.program, fragmentShader);
+        this.gl.linkProgram(this.program);
+        this.gl.detachShader(this.program, vertexShader);
+        this.gl.detachShader(this.program, fragmentShader);
+        this.gl.deleteShader(vertexShader);
+        this.gl.deleteShader(fragmentShader);
+      }
+
+      rectangle(position, dimensions) {
+        const [x, y] = position;
+        const [width, height] = dimensions;
+        this.rectangleBuffer.push(
+          x, y,
+          x + width, y,
+          x, y + height,
+          x, y + height,
+          x + width, y,
+          x + width, y + height
+        );
+      }
+
+      horizontalLine(bottom) {
+        this.rectangle([0, bottom], [this.width, this.lineThickness]);
+      }
+
+      verticalLine(left) {
+        this.rectangle([left, 0], [this.lineThickness, this.height]);
+      }
+
+      blackSquare(x, y) {
+        const size = this.defaultSize * this.scale;
+        this.rectangle(
+            [x*size + this.offsetX, y*size + this.offsetY],
+            [size, size]
+        )
+      }
+
+      clearCanvas() {
+        this.gl.clearColor(0, 0, 0, 0);
+        this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+      }
+
+      draw() {
+        this.setDimensions();
+        const positionAttributeLocation = this.gl
+          .getAttribLocation(this.program, 'a_position');
+        const resolutionUniformLocation = this.gl
+          .getUniformLocation(this.program, 'u_resolution');
+        const positionBuffer = this.gl.createBuffer();
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, positionBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER,
+            new Float32Array(this.rectangleBuffer),
+            this.gl.STATIC_DRAW);
+        this.gl.viewport(0, 0, this.gl.canvas.width, this.gl.canvas.height);
+        this.gl.useProgram(this.program);
+        this.gl.enableVertexAttribArray(positionAttributeLocation);
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, positionBuffer);
+        const size = 2;
+        const type = this.gl.FLOAT;
+        const normalize = false;
+        const stride = 0;
+        let offset = 0;
+        this.gl.vertexAttribPointer(
+            positionAttributeLocation, size, type, normalize, stride, offset)
+        this.gl.uniform2f(resolutionUniformLocation,
+            this.gl.canvas.width,
+            this.gl.canvas.height);
+        const count = this.rectangleBuffer.length/2;
+        this.gl.drawArrays(this.gl.TRIANGLES, 0, count);
+      }
+
+      createGrid() {
+        const size = this.defaultSize * this.scale;
+        for(let b = 0; b <= this.height; b += size)
+          this.horizontalLine(b + this.offsetY % size);
+        for(let l = 0; l <= this.width; l += size)
+          this.verticalLine(l + this.offsetX % size);
+      }
+
+      animationLoop() {
+        const grid = this;
+        const drawScene = () => {
+          grid.createGrid();
+          for(let idx in this.blackCells)
+            grid.blackSquare(...this.blackCells[idx]);
+          grid.draw();
+          grid.rectangleBuffer = [];
+          window.requestAnimationFrame(drawScene);
+        }
+        drawScene();
+      }
+
+      handleEvents() {
+        this.canvas.addEventListener('wheel',
+          event => this.zoom(event));
+        window.addEventListener('keydown',
+          event => this.keyboardMove(event));
+        this.handleMouseMove = this.handleMouseMove.bind(this)
+        this.canvas.addEventListener('mousedown',
+          event => this.handleMouse(event));
+        this.canvas.addEventListener('mouseup',
+          event => this.handleMouse(event));
+      }
+
+
+      boundScale(scale) {
+        return Math.max(
+            Math.min(
+              scale,
+              this.maxZoomFactor
+            ),
+            this.minZoomFactor
+          );
+      }
+
+      zoom(event) {
+        event.preventDefault();
+        /*const fixedPoint = [
+          event.clientX,
+          this.height - event.clientY
+        ],*/
+        const fixedPoint = [
+          this.width/2,
+          this.height/2
+        ];
+        let deltaZoom = this.scale;
+        this.scale = this
+          .boundScale(this.scale + event.deltaY * this.zoomingSpeed);
+        deltaZoom -= this.scale;
+        const netOffsets = [
+          this.offsetX - this.zoomOffsetX,
+          this.offsetY - this.zoomOffsetY
+        ],
+          offsetNudges = [
+            (fixedPoint[0] - netOffsets[0]) * deltaZoom + netOffsets[0],
+            (fixedPoint[1] - netOffsets[1]) * deltaZoom + netOffsets[1],
+          ];
+        this.offsetX += offsetNudges[0];
+        this.offsetY += offsetNudges[1];
+        this.zoomOffsetX += offsetNudges[0];
+        console.log(this.zoomOffsetX, fixedPoint[0] * (1 - this.scale))
+        this.zoomOffsetY += offsetNudges[1];
+      }
+
+      keyboardMove(event) {
+        switch(event.key) {
+          case 'ArrowUp':
+            this.offsetY -= this.keyboardSpeed;
+            break;
+          case 'ArrowDown':
+            this.offsetY += this.keyboardSpeed;
+            break;
+          case 'ArrowLeft':
+            this.offsetX += this.keyboardSpeed;
+            break;
+          case 'ArrowRight':
+            this.offsetX -= this.keyboardSpeed;
+            break;
+        }
+      }
+
+      static setCursor(cursorType) {
+        document.body.style.cursor = cursorType;
+      }
+
+      handleMouseMove(event) {
+        if(!this.hasMoved)
+          Grid.setCursor('move')
+        this.hasMoved = true;
+        const deltaX = event.clientX - this.clickReferencePoint[0],
+          deltaY = this.clickReferencePoint[1] - event.clientY;
+        this.offsetX = this.clickReferenceOffset[0] + deltaX;
+        this.offsetY = this.clickReferenceOffset[1] + deltaY;
+      }
+
+      changeCellState(cellPosition) {
+        let newCells = [];
+        this.blackCells.forEach((cell, idx, array) => {
+          if(cell[0] !== cellPosition[0] || cell[1] !== cellPosition[1])
+            newCells.push(cell);
+        });
+        if(newCells.length === this.blackCells.length)
+          newCells.push(cellPosition)
+        this.blackCells = newCells;
+      }
+
+      handleMouse(event) {
+        switch(event.type) {
+          case 'mouseup':
+            this.canvas.removeEventListener('mousemove', this.handleMouseMove);
+            Grid.setCursor('default')
+            if(!this.hasMoved) {
+              const size = this.defaultSize * this.scale;
+              this.changeCellState([
+                Math.floor((event.clientX - this.offsetX) / size),
+                Math.floor((this.height - event.clientY - this.offsetY) / size)
+              ])
+            }
+            break;
+          case 'mousedown':
+            this.clickReferencePoint = [event.clientX, event.clientY];
+            this.clickReferenceOffset = [this.offsetX, this.offsetY];
+            this.hasMoved = false;
+            this.canvas.addEventListener('mousemove', this.handleMouseMove);
+            break;
+        }
+      }
+    }
+
+    class Cell {
+    	constructor(x, y) {
+      	this.x = x;
+        this.y = y;
+      }
+
+      get neighbours() {
+      	const cellPos = [this.x, this.y];
+        let neighboursPos = [];
+        for(let dx = -1; dx <= 1; dx++)
+          for(let dy = -1; dy <= 1; dy++)
+          	neighboursPos.push([this.x + dx, this.y + dy]);
+        neighboursPos.splice(4, 1);
+        return neighboursPos
+        	.map(pos => new Cell(...pos));
+      }
+
+      toString() {
+      	return `${this.x},${this.y}`;
+      }
+
+      static fromString(strPos) {
+      	let pos = strPos.split(',').map(Number);
+      	return new Cell(...pos);
+      }
+    }
+
+    class CellMatrix {
+    	constructor(posArray) {
+      	this.cells = posArray
+        	.map(pos => new Cell(...pos));
+      }
+
+      get neighboursRecurrence() {
+      	let neighbours = this.cells
+        	.map(cell => cell.neighbours).flat();
+        let neighboursCount = {};
+        neighbours.forEach(cell => {
+        	let key = cell.toString();
+          if(key in neighboursCount) {
+        		neighboursCount[key] += 1;
+          } else {
+          	neighboursCount[key] = 1;
+          }
+        });
+        return neighboursCount;
+      }
+
+      static fromStringArray(array) {
+      	return new CellMatrix(array
+        	.map(cell => cell.split(',')
+          	.map(Number)))
+      }
+
+      get positions() {
+        return this.cells
+          .map(cell => [cell.x, cell.y]);
+      }
+
+      get nextCells() {
+      	const recurrence = this.neighboursRecurrence;
+        const liveCells = this.cells
+        	.map(cell => cell.toString());
+        const cellFilter = key => {
+        	const count = recurrence[key];
+          const livingConditions = [count === 3,
+          	count === 2 && ~liveCells.indexOf(key)];
+          if(livingConditions.some(Boolean))
+          	return true;
+        }
+    		return CellMatrix.fromStringArray(
+        	Object.keys(recurrence)
+        	.filter(cellFilter));
+      }
+    }
+
+    let grid;
+    let play = false;
+    function nextFrame() {
+      const matrix = new CellMatrix(grid.blackCells);
+      grid.blackCells = matrix.nextCells.positions;
+    }
+
+    window.addEventListener('load', () => {
+      grid = new Grid();
+      console.log(grid.width, grid.height)
+      const animation = () => {
+        if(play) {
+          grid.blackCells = (new CellMatrix(grid.blackCells))
+            .nextCells.positions;
+        }
+        window.requestAnimationFrame(animation);
+      };
+      animation();
+    });
+
+    window.addEventListener('keydown', event => {
+      if(event.code === "Space")
+        play = !play;
+    });
+
+  </script>
+
+  <style>
+    body {
+      margin: 0;
+    }
+  </style>
+</html>
